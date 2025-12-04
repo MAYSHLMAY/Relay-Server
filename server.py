@@ -1,48 +1,43 @@
-import os
 import asyncio
 import websockets
-import json
 
-PORT = int(os.getenv("PORT", 8080))
-
-connected_clients = {}  # device_id -> websocket
+PORT = 8080
+connected = {}  # device_id -> websocket
 
 async def handler(ws, path):
     device_id = None
-    print("Client connected")
     try:
         async for msg in ws:
-            try:
-                data = json.loads(msg)
-            except json.JSONDecodeError:
-                continue
-
-            # Register device
-            if data.get("type") == "register" and "id" in data:
-                device_id = data["id"]
-                connected_clients[device_id] = ws
-                print(f"✅ Registered device {device_id}")
-                continue
-
-            # Forward messages to target device
-            target_id = data.get("to")
-            if target_id and target_id in connected_clients:
-                target_ws = connected_clients[target_id]
-                try:
-                    await target_ws.send(json.dumps(data))
-                    print(f"📤 Forwarded message from {device_id} → {target_id}")
-                except:
-                    print(f"❌ Failed to send to {target_id}")
-
-    except websockets.exceptions.ConnectionClosed:
-        print(f"Client {device_id} disconnected")
-    finally:
-        if device_id in connected_clients:
-            del connected_clients[device_id]
+            if isinstance(msg, str):
+                data = msg.split(" ", 1)
+                if data[0] == "REGISTER":
+                    device_id = data[1]
+                    connected[device_id] = ws
+                    print(f"✅ Registered device {device_id}")
+                elif data[0] == "FORWARD":
+                    # FORWARD target_id rest_of_msg
+                    target_id, payload = data[1].split(" ", 1)
+                    if target_id in connected:
+                        await connected[target_id].send(payload)
+            else:
+                # binary data forwarding
+                # expect the first 36 bytes to be header: TARGET_ID|SEQ|TOTAL
+                header_len = 36
+                header = msg[:header_len].decode()
+                target_id, seq, total = header.split("|")
+                if target_id in connected:
+                    await connected[target_id].send(msg)
+    except websockets.ConnectionClosed:
+        if device_id in connected:
+            del connected[device_id]
+        print(f"❌ Disconnected {device_id}")
 
 async def main():
     print(f"🌐 WebSocket relay running on port {PORT}")
-    async with websockets.serve(handler, "0.0.0.0", PORT):
-        await asyncio.Future()  # keep running
+    async with websockets.serve(
+        handler, "0.0.0.0", PORT,
+        ping_interval=30, ping_timeout=60, max_size=None
+    ):
+        await asyncio.Future()
 
 asyncio.run(main())
